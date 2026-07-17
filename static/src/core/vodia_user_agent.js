@@ -637,6 +637,9 @@ export class VodiaUserAgent {
         }
         if (this.session.call.state === "ongoing") {
             await this.callService.end(this.session.call);
+        } else if (this.session.call.direction === "incoming") {
+            // The caller hung up before the call was answered.
+            await this.callService.miss(this.session.call);
         } else if (statusCode >= 400) {
             await this.callService.reject(this.session.call);
         } else {
