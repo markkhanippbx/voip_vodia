@@ -105,8 +105,11 @@ export class VodiaUserAgent {
             await this._connect();
         } catch (error) {
             console.error(error);
+            // RPC errors carry the meaningful server message (e.g. a
+            // UserError raised while minting the token) in error.data.
+            const message = error.data?.message || error.message;
             this.voip.triggerError(
-                _t("Could not connect to the Vodia PBX:\n\n%(error)s", { error: error.message })
+                _t("Could not connect to the Vodia PBX:\n\n%(error)s", { error: message })
             );
         }
     }
