@@ -571,6 +571,12 @@ export class VodiaUserAgent {
             return;
         }
         this.ringtoneService.stopPlaying();
+        // Vodia may assign its own call id instead of echoing ours: adopt it
+        // so that subsequent messages (bye, hold, transfer) reference the id
+        // the PBX knows.
+        if (message.callid) {
+            this.session.vodia.callid = message.callid;
+        }
         if (message.cseq !== undefined) {
             this.session.vodia.cseq = message.cseq;
         }
@@ -587,6 +593,7 @@ export class VodiaUserAgent {
             this.hangup();
             return;
         }
+        this.session.vodia.answered = true;
         this.session.inviteState = "ok";
         this._setUpRemoteAudio();
         if (this.voip.willCallFromAnotherDevice) {
@@ -594,6 +601,39 @@ export class VodiaUserAgent {
             return;
         }
         this.callService.start(this.session.call);
+    }
+
+    /**
+     * Handles an updated SDP for an already-established call (e.g. the final
+     * answer after early media, or a renegotiation on hold/resume). Never
+     * fatal: a failure to apply a renegotiated SDP must not kill the call.
+     *
+     * @param {Object} message
+     */
+    async _onUpdatedSdp(message) {
+        if (!this.peerConnection || !message.sdp) {
+            return;
+        }
+        if (message.callid) {
+            this.session.vodia.callid = message.callid;
+        }
+        if (message.cseq !== undefined) {
+            this.session.vodia.cseq = message.cseq;
+        }
+        try {
+            // An RTCPeerConnection in "stable" state cannot take another
+            // answer directly; a full renegotiation would require a new
+            // offer/answer round. Applying is only attempted when legal.
+            if (this.peerConnection.signalingState === "have-local-offer") {
+                await this.peerConnection.setRemoteDescription({
+                    type: "answer",
+                    sdp: message.sdp,
+                });
+            }
+        } catch (error) {
+            console.error("[voip_vodia] could not apply updated SDP:", error);
+        }
+        this._setUpRemoteAudio();
     }
 
     /**
@@ -681,22 +721,41 @@ export class VodiaUserAgent {
         } catch {
             return;
         }
-        if (odoo.debug !== "") {
-            console.debug("[voip_vodia] received:", message);
-        }
+        // Always logged at debug level: enable the "Verbose" filter in the
+        // browser console to capture the live message schemas.
+        console.debug("[voip_vodia] received:", ev.data);
         const action = message.action || message.type || "";
         switch (action) {
             case "sdp-packet": {
-                if (this.session?.vodia?.isCaller && message.callid === this.session.vodia.callid) {
-                    // SDP for our own outgoing call: treat as the answer.
+                if (this.session?.vodia?.isCaller && !this.session.vodia.answered) {
+                    // SDP sent to us while we have a pending outgoing call:
+                    // this is the answer (possibly early media). Vodia may use
+                    // its own call id rather than echoing ours, so do not
+                    // require a callid match here.
                     this._onOutgoingInvitationAccepted(message);
-                } else {
+                } else if (!this.session) {
                     this._onIncomingInvitation(message);
+                } else if (this.session.vodia?.isCaller) {
+                    // Updated SDP for the established call (e.g. on pickup
+                    // after early media, or on hold/resume).
+                    this._onUpdatedSdp(message);
+                } else {
+                    this._send({
+                        action: "sip-busy",
+                        callid: message.callid,
+                        cseq: message.cseq,
+                        code: 486 /* Busy Here */,
+                    });
                 }
                 break;
             }
             case "sdp-200ok":
-                this._onOutgoingInvitationAccepted(message);
+            case "sdp-answer":
+                if (this.session?.vodia?.answered) {
+                    this._onUpdatedSdp(message);
+                } else {
+                    this._onOutgoingInvitationAccepted(message);
+                }
                 break;
             case "sip-ringing":
             case "ringing": {
