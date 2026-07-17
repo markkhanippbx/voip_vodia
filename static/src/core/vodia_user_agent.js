@@ -366,9 +366,13 @@ export class VodiaUserAgent {
      * @param {{ token: string, pbx: string }} tokenInfo
      */
     async _authenticate(tokenInfo) {
+        // Deliberately NO Content-Type header: it keeps the request "simple"
+        // so the browser sends it without a CORS preflight — Vodia rejects
+        // OPTIONS preflights with 403 (its own example client uses no-cors
+        // mode for the same reason), while it accepts simple cross-origin
+        // POSTs and reflects the origin with Allow-Credentials: true.
         const response = await fetch(`https://${tokenInfo.pbx}/rest/system/session`, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
             credentials: "include",
             body: JSON.stringify({ name: "session", value: tokenInfo.token }),
         });
