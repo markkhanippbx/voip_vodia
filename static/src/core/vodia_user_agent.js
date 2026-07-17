@@ -134,12 +134,15 @@ export class VodiaUserAgent {
             await pc.setRemoteDescription({ type: "offer", sdp: vodia.remoteOffer });
             const answer = await pc.createAnswer();
             await pc.setLocalDescription(answer);
+            // The answer is sent in the object form used by Vodia's own
+            // client: {"sdp": {"sdp": ..., "type": "answer"}}.
             this._send({
                 action: "sdp-200ok",
-                sdp: pc.localDescription.sdp,
+                sdp: { sdp: answer.sdp, type: "answer" },
                 callid: vodia.callid,
                 cseq: vodia.cseq,
             });
+            vodia.answered = true;
             this.session.inviteState = "ok";
         } catch (error) {
             console.error(error);
@@ -340,6 +343,11 @@ export class VodiaUserAgent {
                     30000
                 );
                 this._send({ action: "own-calls", subscribe: true });
+                // domain-calls delivers "call-state" events (alerting →
+                // connected), used to detect when an outgoing call is picked
+                // up — the PBX sends no explicit connect message to the
+                // caller's socket.
+                this._send({ action: "domain-calls", subscribe: true });
                 this.voip.resolveError();
                 resolve();
             };
@@ -538,9 +546,8 @@ export class VodiaUserAgent {
             this._send({ action: "sip-busy", callid, cseq, code: 488 /* Not Acceptable Here */ });
             return;
         }
-        // NOTE: the exact field carrying the caller's number must be confirmed
-        // against live traffic from the target Vodia version.
-        const phoneNumber = message.from || message.caller || message.user || _t("Unknown");
+        const phoneNumber =
+            message["from-user"] || message["from-number"] || message.from || _t("Unknown");
         const call = await this.callService.create({
             direction: "incoming",
             phone_number: cleanPhoneNumber(String(phoneNumber)),
@@ -552,7 +559,7 @@ export class VodiaUserAgent {
             call,
             isMute: false,
             isOnHold: false,
-            vodia: { callid, cseq, isCaller: false, remoteOffer: message.sdp },
+            vodia: { callid, cseq, isCaller: false, remoteOffer: message.invitesdp || message.sdp },
         };
         this.softphone.show();
         if (this.multiTabService.isOnMainTab()) {
@@ -566,76 +573,6 @@ export class VodiaUserAgent {
      *
      * @param {Object} message
      */
-    async _onOutgoingInvitationAccepted(message) {
-        if (!this.session?.vodia?.isCaller || !this.peerConnection) {
-            return;
-        }
-        this.ringtoneService.stopPlaying();
-        // Vodia may assign its own call id instead of echoing ours: adopt it
-        // so that subsequent messages (bye, hold, transfer) reference the id
-        // the PBX knows.
-        if (message.callid) {
-            this.session.vodia.callid = message.callid;
-        }
-        if (message.cseq !== undefined) {
-            this.session.vodia.cseq = message.cseq;
-        }
-        try {
-            await this.peerConnection.setRemoteDescription({ type: "answer", sdp: message.sdp });
-        } catch (error) {
-            console.error(error);
-            this.voip.triggerError(
-                _t("An error occurred while establishing the call:\n\n%(error)s", {
-                    error: error.message,
-                }),
-                { isNonBlocking: true }
-            );
-            this.hangup();
-            return;
-        }
-        this.session.vodia.answered = true;
-        this.session.inviteState = "ok";
-        this._setUpRemoteAudio();
-        if (this.voip.willCallFromAnotherDevice) {
-            this.transfer(this.session.transferTarget);
-            return;
-        }
-        this.callService.start(this.session.call);
-    }
-
-    /**
-     * Handles an updated SDP for an already-established call (e.g. the final
-     * answer after early media, or a renegotiation on hold/resume). Never
-     * fatal: a failure to apply a renegotiated SDP must not kill the call.
-     *
-     * @param {Object} message
-     */
-    async _onUpdatedSdp(message) {
-        if (!this.peerConnection || !message.sdp) {
-            return;
-        }
-        if (message.callid) {
-            this.session.vodia.callid = message.callid;
-        }
-        if (message.cseq !== undefined) {
-            this.session.vodia.cseq = message.cseq;
-        }
-        try {
-            // An RTCPeerConnection in "stable" state cannot take another
-            // answer directly; a full renegotiation would require a new
-            // offer/answer round. Applying is only attempted when legal.
-            if (this.peerConnection.signalingState === "have-local-offer") {
-                await this.peerConnection.setRemoteDescription({
-                    type: "answer",
-                    sdp: message.sdp,
-                });
-            }
-        } catch (error) {
-            console.error("[voip_vodia] could not apply updated SDP:", error);
-        }
-        this._setUpRemoteAudio();
-    }
-
     /**
      * Triggered when the PBX rejects our outgoing call. Mirrors the native
      * SIP status-code-to-message mapping.
@@ -672,14 +609,31 @@ export class VodiaUserAgent {
     }
 
     /**
-     * Triggered when the remote party hangs up an established call.
+     * Triggered when the PBX terminates our call leg: remote party hangup, or
+     * an error condition — the message then carries a SIP-style "code" (e.g.
+     * {"bye": "true", "callid": ..., "code": 415}).
+     *
+     * @param {Object} [message]
      */
-    async _onRemoteBye() {
+    async _onRemoteBye(message = {}) {
         if (!this.session) {
             return;
         }
         this.ringtoneService.stopPlaying();
-        await this.callService.end(this.session.call);
+        const statusCode = Number(message.code) || 0;
+        if (statusCode >= 400) {
+            this.voip.triggerError(
+                _t("The PBX terminated the call (code %(code)s).", { code: statusCode }),
+                { isNonBlocking: true }
+            );
+        }
+        if (this.session.call.state === "ongoing") {
+            await this.callService.end(this.session.call);
+        } else if (statusCode >= 400) {
+            await this.callService.reject(this.session.call);
+        } else {
+            await this.callService.abort(this.session.call);
+        }
         this._cleanUpPeerConnection();
         this.session = null;
         if (this.softphone.isInAutoCallMode) {
@@ -724,43 +678,40 @@ export class VodiaUserAgent {
         // Always logged at debug level: enable the "Verbose" filter in the
         // browser console to capture the live message schemas.
         console.debug("[voip_vodia] received:", ev.data);
-        const action = message.action || message.type || "";
-        switch (action) {
-            case "sdp-packet": {
-                if (this.session?.vodia?.isCaller && !this.session.vodia.answered) {
-                    // SDP sent to us while we have a pending outgoing call:
-                    // this is the answer (possibly early media). Vodia may use
-                    // its own call id rather than echoing ours, so do not
-                    // require a callid match here.
-                    this._onOutgoingInvitationAccepted(message);
-                } else if (!this.session) {
-                    this._onIncomingInvitation(message);
-                } else if (this.session.vodia?.isCaller) {
-                    // Updated SDP for the established call (e.g. on pickup
-                    // after early media, or on hold/resume).
-                    this._onUpdatedSdp(message);
-                } else {
-                    this._send({
-                        action: "sip-busy",
-                        callid: message.callid,
-                        cseq: message.cseq,
-                        code: 486 /* Busy Here */,
-                    });
-                }
-                break;
+        // Most PBX-to-client messages carry NO "action" field (observed on
+        // Vodia 70.1): they are identified by their payload fields instead.
+        if (!message.action) {
+            if (message.invitesdp) {
+                // Incoming call: the PBX's SDP offer for our leg.
+                this._onIncomingInvitation(message);
+            } else if (message.bye) {
+                this._onRemoteBye(message);
+            } else if (message.sdp) {
+                // SDP for our pending call (e.g. code 183 early media). The
+                // PBX sends its own OFFER (a=setup:actpass) regardless of the
+                // SDP we sent in sdp-packet, and expects an answer back.
+                this._onRemoteSdp(message);
+            } else if (message.candidate && this.peerConnection) {
+                // Trickle ICE from the PBX: a raw candidate string.
+                const candidate = String(message.candidate).trim();
+                this.peerConnection
+                    .addIceCandidate({ candidate, sdpMid: "0", sdpMLineIndex: 0 })
+                    .catch((error) => console.error(error));
             }
+            return;
+        }
+        switch (message.action) {
+            case "sdp-packet":
             case "sdp-200ok":
             case "sdp-answer":
-                if (this.session?.vodia?.answered) {
-                    this._onUpdatedSdp(message);
-                } else {
-                    this._onOutgoingInvitationAccepted(message);
-                }
+                this._onRemoteSdp(message);
+                break;
+            case "call-state":
+                this._onCallState(message);
                 break;
             case "sip-ringing":
             case "ringing": {
                 if (this.session?.vodia?.isCaller) {
-                    this.ringtoneService.ringback.play();
                     this.session.inviteState = "ringing";
                 }
                 break;
@@ -775,7 +726,7 @@ export class VodiaUserAgent {
             }
             case "sip-bye":
             case "bye":
-                this._onRemoteBye();
+                this._onRemoteBye(message);
                 break;
             case "sip-cancel":
             case "cancel": {
@@ -793,13 +744,117 @@ export class VodiaUserAgent {
                 }
                 break;
             }
-            default: {
-                const statusCode = Number(message.code || message.statusCode);
-                if (this.session?.vodia?.isCaller && statusCode >= 400) {
-                    this._onOutgoingInvitationRejected(statusCode, message.reason || "");
-                }
+            // Informational messages, no call-control impact.
+            case "user-change":
+            case "blf":
+            case "missed-calls":
+            case "rec-start":
+            case "rec-stop":
+            case "bye-response":
                 break;
+            default:
+                break;
+        }
+    }
+
+    /**
+     * Handles SDP pushed by the PBX for our current call. On Vodia the PBX
+     * itself makes the WebRTC offer for each leg (its SDP has
+     * a=setup:actpass), even for calls we initiate: the client must roll back
+     * its own pending offer, apply the PBX's offer and reply with an answer
+     * ("sdp-200ok"), otherwise the leg never completes codec negotiation and
+     * the PBX kills the call with code 415 on pickup.
+     *
+     * @param {Object} message
+     */
+    async _onRemoteSdp(message) {
+        if (!this.session || !this.peerConnection) {
+            return;
+        }
+        const pc = this.peerConnection;
+        const sdp = typeof message.sdp === "object" ? message.sdp.sdp : message.sdp;
+        if (!sdp) {
+            return;
+        }
+        if (message.callid) {
+            this.session.vodia.callid = message.callid;
+        }
+        if (message.cseq !== undefined) {
+            this.session.vodia.cseq = message.cseq;
+        }
+        const statusCode = Number(message.code) || 0;
+        if (statusCode >= 400) {
+            this._onOutgoingInvitationRejected(statusCode, message.reason || "");
+            return;
+        }
+        const isOffer = /a=setup:actpass/.test(sdp);
+        try {
+            if (isOffer) {
+                if (pc.signalingState === "have-local-offer") {
+                    await pc.setLocalDescription({ type: "rollback" });
+                }
+                await pc.setRemoteDescription({ type: "offer", sdp });
+                const answer = await pc.createAnswer();
+                await pc.setLocalDescription(answer);
+                this._send({
+                    action: "sdp-200ok",
+                    sdp: { sdp: answer.sdp, type: "answer" },
+                    callid: this.session.vodia.callid,
+                    cseq: this.session.vodia.cseq,
+                });
+            } else if (pc.signalingState === "have-local-offer") {
+                await pc.setRemoteDescription({ type: "answer", sdp });
             }
+        } catch (error) {
+            console.error("[voip_vodia] could not apply remote SDP:", error);
+            return;
+        }
+        this.session.vodia.answered = true;
+        this._setUpRemoteAudio();
+        // Local tones stop here: ringback now comes as early media over RTP.
+        this.ringtoneService.stopPlaying();
+        if (statusCode === 183 || statusCode === 180) {
+            this.session.inviteState = "ringing";
+        } else if (this.session.vodia.isCaller) {
+            this._markConnected();
+        }
+    }
+
+    /**
+     * Marks the outgoing call as picked up (idempotent). Triggered by a
+     * code-200 SDP or by a "call-state" event reporting the call connected.
+     */
+    _markConnected() {
+        if (!this.session || this.session.call.state === "ongoing") {
+            return;
+        }
+        this.ringtoneService.stopPlaying();
+        this.session.inviteState = "ok";
+        if (this.voip.willCallFromAnotherDevice) {
+            this.transfer(this.session.transferTarget);
+            return;
+        }
+        this.callService.start(this.session.call);
+    }
+
+    /**
+     * Handles "call-state" events (domain-calls subscription): used to detect
+     * that our outgoing call transitioned to "connected", since the PBX does
+     * not push an explicit connect message to the caller's socket.
+     *
+     * @param {Object} message
+     */
+    _onCallState(message) {
+        if (!this.session?.vodia?.isCaller || !Array.isArray(message.calls)) {
+            return;
+        }
+        const ownCall = message.calls.find(
+            (call) =>
+                call["from-number"] === this.extension ||
+                (call.extension || []).some((ext) => String(ext).replace("*", "") === this.extension)
+        );
+        if (ownCall?.state === "connected" || (ownCall?.connect && ownCall.connect !== "")) {
+            this._markConnected();
         }
     }
 
