@@ -453,7 +453,11 @@ export class VodiaUserAgent {
      * @returns {RTCPeerConnection}
      */
     _createPeerConnection(callid) {
+        // Candidates the PBX trickled before this call was accepted must
+        // survive the cleanup of the previous connection.
+        const pendingCandidates = this.pendingRemoteIceCandidates;
         this._cleanUpPeerConnection();
+        this.pendingRemoteIceCandidates = pendingCandidates;
         const pc = new window.RTCPeerConnection();
         pc.onicecandidate = (ev) => {
             if (ev.candidate) {
@@ -461,6 +465,10 @@ export class VodiaUserAgent {
             }
         };
         pc.ontrack = () => this._setUpRemoteAudio();
+        pc.oniceconnectionstatechange = () =>
+            console.info("[voip_vodia] ICE state:", pc.iceConnectionState);
+        pc.onconnectionstatechange = () =>
+            console.info("[voip_vodia] connection state:", pc.connectionState);
         this.peerConnection = pc;
         return pc;
     }
@@ -741,9 +749,28 @@ export class VodiaUserAgent {
                 // SDP we sent in sdp-packet, and expects an answer back.
                 this._onRemoteSdp(message);
             } else if (message.candidate) {
-                // Trickle ICE from the PBX: a raw candidate string.
-                const candidate = String(message.candidate).trim();
-                this._addRemoteIceCandidate({ candidate, sdpMid: "0", sdpMLineIndex: 0 });
+                // Trickle ICE from the PBX: a raw candidate string, plus an
+                // "adr" list of (address, port) pairs to substitute into it —
+                // one candidate per address (mirrors Vodia's own client).
+                const fields = String(message.candidate).trim().split(" ");
+                if (Array.isArray(message.adr) && fields.length > 5) {
+                    for (const [address, port] of message.adr) {
+                        const variant = [...fields];
+                        variant[4] = String(address);
+                        variant[5] = String(port);
+                        this._addRemoteIceCandidate({
+                            candidate: variant.join(" "),
+                            sdpMid: "0",
+                            sdpMLineIndex: 0,
+                        });
+                    }
+                } else {
+                    this._addRemoteIceCandidate({
+                        candidate: fields.join(" "),
+                        sdpMid: "0",
+                        sdpMLineIndex: 0,
+                    });
+                }
             }
             return;
         }
@@ -863,6 +890,11 @@ export class VodiaUserAgent {
         if (statusCode === 183 || statusCode === 180) {
             this.session.inviteState = "ringing";
         } else if (this.session.vodia.isCaller) {
+            // Final responses to our invite are acknowledged (Vodia's own
+            // client sends sip-ack for any code >= 200).
+            if (statusCode >= 200) {
+                this._send({ action: "sip-ack", callid: this.session.vodia.callid });
+            }
             this._markConnected();
         }
     }
