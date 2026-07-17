@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<odoo>
+    <record id="voip_provider_tree_view_vodia" model="ir.ui.view">
+        <field name="name">VoIP Provider List View (Vodia)</field>
+        <field name="model">voip.provider</field>
+        <field name="inherit_id" ref="voip.voip_provider_tree_view"/>
+        <field name="arch" type="xml">
+            <field name="name" position="after">
+                <field name="provider_type"/>
+            </field>
+            <field name="ws_server" position="attributes">
+                <attribute name="required">mode == 'prod' and provider_type == 'freepbx'</attribute>
+                <attribute name="readonly">provider_type == 'vodia'</attribute>
+            </field>
+            <field name="pbx_ip" position="attributes">
+                <attribute name="string">PBX Server (IP / Domain)</attribute>
+            </field>
+            <field name="pbx_ip" position="after">
+                <field name="vodia_domain" optional="show" required="mode == 'prod' and provider_type == 'vodia'" readonly="provider_type != 'vodia'"/>
+                <field name="vodia_admin_username" optional="hide" readonly="provider_type != 'vodia'"/>
+                <field name="vodia_admin_password" optional="hide" password="True" readonly="provider_type != 'vodia'"/>
+            </field>
+        </field>
+    </record>
+</odoo>
