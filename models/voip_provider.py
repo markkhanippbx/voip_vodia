@@ -1,6 +1,6 @@
 import requests
 
-from odoo import fields, models
+from odoo import _, fields, models
 from odoo.exceptions import UserError
 
 VODIA_REQUEST_TIMEOUT = 10
@@ -56,19 +56,23 @@ class VoipProvider(models.Model):
         else's extension. The admin credentials never leave the server.
         """
         self.ensure_one()
-        self.check_access("read")
+        if hasattr(self, "check_access"):  # Odoo >= 18
+            self.check_access("read")
+        else:  # Odoo <= 17
+            self.check_access_rights("read")
+            self.check_access_rule("read")
         provider = self.sudo()
         if provider.provider_type != "vodia":
-            raise UserError(self.env._("This provider is not a Vodia provider."))
+            raise UserError(_("This provider is not a Vodia provider."))
         extension = self.env.user.voip_username
         if not extension:
             raise UserError(
-                self.env._("Your VoIP username (extension number) is not set. Please configure it in your user preferences.")
+                _("Your VoIP username (extension number) is not set. Please configure it in your user preferences.")
             )
         host = provider._get_vodia_host()
         if not (host and provider.vodia_domain and provider.vodia_admin_username and provider.vodia_admin_password):
             raise UserError(
-                self.env._("The Vodia provider is not fully configured. Please contact your administrator.")
+                _("The Vodia provider is not fully configured. Please contact your administrator.")
             )
         try:
             response = requests.post(
@@ -80,7 +84,7 @@ class VoipProvider(models.Model):
             response.raise_for_status()
         except requests.exceptions.RequestException as error:
             raise UserError(
-                self.env._("Could not authenticate with the Vodia PBX: %(error)s", error=error)
+                _("Could not authenticate with the Vodia PBX: %(error)s", error=error)
             ) from error
         # The token may come back as plain text or wrapped in a JSON value
         # depending on the Vodia version.
@@ -94,7 +98,7 @@ class VoipProvider(models.Model):
         elif isinstance(payload, str):
             token = payload
         if not token:
-            raise UserError(self.env._("The Vodia PBX did not return a session token."))
+            raise UserError(_("The Vodia PBX did not return a session token."))
         return {
             "token": token,
             "domain": provider.vodia_domain,
