@@ -600,8 +600,11 @@ export class VodiaUserAgent {
             this._send({ action: "sip-busy", callid, cseq, code: 488 /* Not Acceptable Here */ });
             return;
         }
+        // For external calls the full E.164 number (+1...) is usually in the
+        // "from" SIP URI, while "from-user" may hold the national form.
+        const uriMatch = /<sip:([^@;>]+)@/.exec(message.from || "");
         const phoneNumber =
-            message["from-user"] || message["from-number"] || message.from || _t("Unknown");
+            uriMatch?.[1] || message["from-user"] || message["from-number"] || _t("Unknown");
         const call = await this.callService.create({
             direction: "incoming",
             phone_number: cleanPhoneNumber(String(phoneNumber)),
