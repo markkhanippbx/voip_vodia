@@ -348,6 +348,14 @@ export class VodiaUserAgent {
                 // up — the PBX sends no explicit connect message to the
                 // caller's socket.
                 this._send({ action: "domain-calls", subscribe: true });
+                // Registers this WebSocket as a phone for the extension: the
+                // PBX only routes incoming calls to registered endpoints
+                // (they go straight to voicemail otherwise). Same message
+                // Vodia's own portal sends on startup.
+                this._send({
+                    action: "sip-register",
+                    useragent: `Odoo VoIP (${window.navigator.userAgent})`,
+                });
                 this.voip.resolveError();
                 resolve();
             };
