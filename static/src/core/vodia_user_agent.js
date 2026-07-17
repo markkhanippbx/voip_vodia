@@ -28,6 +28,15 @@ export class VodiaUserAgent {
     keepAliveInterval;
     /** @type {RTCPeerConnection} */
     peerConnection;
+    /**
+     * Remote ICE candidates received before the peer connection has a remote
+     * description (e.g. the PBX trickles its candidate right after the
+     * invitesdp, before the user accepts the call). They are applied as soon
+     * as the remote description is set.
+     *
+     * @type {RTCIceCandidateInit[]}
+     */
+    pendingRemoteIceCandidates = [];
     preferredInputDevice;
     /** @type {HTMLAudioElement} */
     remoteAudio = new window.Audio();
@@ -132,6 +141,7 @@ export class VodiaUserAgent {
                 pc.addTrack(track, stream);
             }
             await pc.setRemoteDescription({ type: "offer", sdp: vodia.remoteOffer });
+            this._flushPendingIceCandidates();
             const answer = await pc.createAnswer();
             await pc.setLocalDescription(answer);
             // The answer is sent in the object form used by Vodia's own
@@ -397,8 +407,36 @@ export class VodiaUserAgent {
         }
     }
 
+    /**
+     * Applies a remote ICE candidate, or queues it until the peer connection
+     * has a remote description (adding earlier throws).
+     *
+     * @param {RTCIceCandidateInit} candidateInit
+     */
+    _addRemoteIceCandidate(candidateInit) {
+        if (this.peerConnection?.remoteDescription) {
+            this.peerConnection
+                .addIceCandidate(candidateInit)
+                .catch((error) => console.error(error));
+        } else {
+            this.pendingRemoteIceCandidates.push(candidateInit);
+        }
+    }
+
+    _flushPendingIceCandidates() {
+        if (!this.peerConnection?.remoteDescription) {
+            return;
+        }
+        for (const candidateInit of this.pendingRemoteIceCandidates.splice(0)) {
+            this.peerConnection
+                .addIceCandidate(candidateInit)
+                .catch((error) => console.error(error));
+        }
+    }
+
     _cleanUpPeerConnection() {
         this._cleanUpRemoteAudio();
+        this.pendingRemoteIceCandidates = [];
         if (this.peerConnection) {
             this.peerConnection.close();
             this.peerConnection = null;
@@ -702,12 +740,10 @@ export class VodiaUserAgent {
                 // PBX sends its own OFFER (a=setup:actpass) regardless of the
                 // SDP we sent in sdp-packet, and expects an answer back.
                 this._onRemoteSdp(message);
-            } else if (message.candidate && this.peerConnection) {
+            } else if (message.candidate) {
                 // Trickle ICE from the PBX: a raw candidate string.
                 const candidate = String(message.candidate).trim();
-                this.peerConnection
-                    .addIceCandidate({ candidate, sdpMid: "0", sdpMLineIndex: 0 })
-                    .catch((error) => console.error(error));
+                this._addRemoteIceCandidate({ candidate, sdpMid: "0", sdpMLineIndex: 0 });
             }
             return;
         }
@@ -728,10 +764,8 @@ export class VodiaUserAgent {
                 break;
             }
             case "ice-candidate": {
-                if (this.peerConnection && message.candidate) {
-                    this.peerConnection
-                        .addIceCandidate(message.candidate)
-                        .catch((error) => console.error(error));
+                if (message.candidate) {
+                    this._addRemoteIceCandidate(message.candidate);
                 }
                 break;
             }
@@ -805,6 +839,7 @@ export class VodiaUserAgent {
                     await pc.setLocalDescription({ type: "rollback" });
                 }
                 await pc.setRemoteDescription({ type: "offer", sdp });
+                this._flushPendingIceCandidates();
                 const answer = await pc.createAnswer();
                 await pc.setLocalDescription(answer);
                 this._send({
@@ -815,6 +850,7 @@ export class VodiaUserAgent {
                 });
             } else if (pc.signalingState === "have-local-offer") {
                 await pc.setRemoteDescription({ type: "answer", sdp });
+                this._flushPendingIceCandidates();
             }
         } catch (error) {
             console.error("[voip_vodia] could not apply remote SDP:", error);
