@@ -81,6 +81,16 @@ class VoipProvider(models.Model):
                 json={"name": "3rd", "username": extension, "domain": provider.vodia_domain},
                 timeout=VODIA_REQUEST_TIMEOUT,
             )
+            # Vodia answers 404 when the endpoint exists but the referenced
+            # domain or extension does not.
+            if response.status_code == 404:
+                raise UserError(
+                    _(
+                        'The Vodia PBX could not find the domain "%(domain)s" or the extension "%(extension)s". Please check that the Vodia Domain matches a domain on the PBX exactly and that the extension exists in it.',
+                        domain=provider.vodia_domain,
+                        extension=extension,
+                    )
+                )
             response.raise_for_status()
         except requests.exceptions.RequestException as error:
             raise UserError(
@@ -97,8 +107,11 @@ class VoipProvider(models.Model):
             token = payload.get("session") or payload.get("value") or payload.get("token") or token
         elif isinstance(payload, str):
             token = payload
-        if not token:
-            raise UserError(_("The Vodia PBX did not return a session token."))
+        # Vodia rejects bad credentials with HTTP 200 and the body "false".
+        if not token or token.lower() == "false":
+            raise UserError(
+                _("The Vodia PBX rejected the token request. Please check the Vodia admin credentials.")
+            )
         return {
             "token": token,
             "domain": provider.vodia_domain,
