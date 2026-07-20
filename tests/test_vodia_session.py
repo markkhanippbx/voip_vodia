@@ -11,6 +11,8 @@ MOCK_PATH = "odoo.addons.voip_vodia.models.voip_provider.requests.post"
 def _make_response(text="tok123", json_side_effect=ValueError, status_error=None):
     response = Mock()
     response.text = text
+    response.status_code = 200
+    response.headers = {"Server": "PBX/70.1"}
     response.json = Mock(side_effect=json_side_effect) if json_side_effect else Mock()
     if status_error:
         response.raise_for_status = Mock(side_effect=status_error)
@@ -53,6 +55,8 @@ class TestVodiaSession(common.TransactionCase):
             "domain": "tenant.example.com",
             "user": "40",
             "pbx": "vodia.example.com",
+            "version": "70.1",
+            "dialect": "auto",
         })
         args, kwargs = mocked_post.call_args
         # Scheme/trailing slash stripped from pbx_ip when building the URL.
@@ -72,6 +76,8 @@ class TestVodiaSession(common.TransactionCase):
         self.assertEqual(result["token"], "quoted")
 
         response = Mock(text='{"session": "fromjson"}', raise_for_status=Mock())
+        response.status_code = 200
+        response.headers = {"Server": "PBX/69.5.6"}
         response.json = Mock(return_value={"session": "fromjson"})
         with patch(MOCK_PATH, return_value=response):
             result = self.vodia_provider.with_user(self.user).get_vodia_session_token()

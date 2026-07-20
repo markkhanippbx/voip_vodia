@@ -338,7 +338,17 @@ export class VodiaUserAgent {
             [this.voip.providerId],
         ]);
         // Signaling dialect differs by PBX major version (see _onRemoteSdp).
+        // The provider can force it; "auto" picks by the reported version.
         this.pbxVersion = parseFloat(tokenInfo.version) || 0;
+        const dialect = tokenInfo.dialect || "auto";
+        this.useLegacyDialect =
+            dialect === "legacy" ||
+            (dialect === "auto" && this.pbxVersion > 0 && this.pbxVersion < 69);
+        console.info(
+            `[voip_vodia] PBX version: ${tokenInfo.version || "unknown"}, dialect: ${
+                this.useLegacyDialect ? "legacy" : "modern"
+            }`
+        );
         await this._authenticate(tokenInfo);
         const url = `wss://${tokenInfo.pbx}/websocket?domain=${encodeURIComponent(
             tokenInfo.domain
@@ -872,7 +882,7 @@ export class VodiaUserAgent {
         // - v67/68: classic flow — the client's sdp-packet SDP is the offer
         //   and the PBX's SDP is the ANSWER (often mislabeled a=setup:actpass;
         //   its own client forces type "answer" regardless).
-        if (isOffer && this.pbxVersion && this.pbxVersion < 69 && this.session.vodia.isCaller) {
+        if (isOffer && this.useLegacyDialect && this.session.vodia.isCaller) {
             isOffer = false;
         }
         try {

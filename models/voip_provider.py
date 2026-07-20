@@ -50,6 +50,18 @@ class VoipProvider(models.Model):
         "Vodia Admin Password",
         groups="base.group_system",
     )
+    vodia_dialect = fields.Selection(
+        [
+            ("auto", "Auto (detect by version)"),
+            ("legacy", "Legacy (v68 and older)"),
+            ("modern", "Modern (v69+)"),
+        ],
+        string="Vodia Dialect",
+        default="auto",
+        help="Signaling dialect of the PBX. Vodia changed the caller-side WebRTC flow in v69: "
+        "Auto picks based on the version the PBX reports; override only if a specific server misbehaves.",
+        groups="base.group_system",
+    )
 
     def _get_vodia_host(self) -> str:
         """The PBX host (FQDN), without scheme or trailing slash. Both the REST
@@ -149,4 +161,5 @@ class VoipProvider(models.Model):
             "user": extension,
             "pbx": host,
             "version": version_match.group(1) if version_match else "",
+            "dialect": provider.vodia_dialect or "auto",
         }
