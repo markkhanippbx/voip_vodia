@@ -1,9 +1,26 @@
+import ssl
+
 import requests
+import requests.adapters
 
 from odoo import _, fields, models
 from odoo.exceptions import UserError
 
 VODIA_REQUEST_TIMEOUT = 10
+
+
+class _LegacyTlsAdapter(requests.adapters.HTTPAdapter):
+    """Connects to old PBXs (e.g. Vodia 67) whose TLS stack predates secure
+    renegotiation (RFC 5746), which OpenSSL 3 rejects by default. Certificate
+    verification stays fully enabled.
+    """
+
+    def init_poolmanager(self, *args, **kwargs):
+        context = ssl.create_default_context()
+        # ssl.OP_LEGACY_SERVER_CONNECT only exists on Python >= 3.12.
+        context.options |= getattr(ssl, "OP_LEGACY_SERVER_CONNECT", 0x4)
+        kwargs["ssl_context"] = context
+        return super().init_poolmanager(*args, **kwargs)
 
 
 class VoipProvider(models.Model):
@@ -74,13 +91,23 @@ class VoipProvider(models.Model):
             raise UserError(
                 _("The Vodia provider is not fully configured. Please contact your administrator.")
             )
+        url = f"https://{host}/rest/system/session"
+        request_kwargs = {
+            "auth": (provider.vodia_admin_username, provider.vodia_admin_password),
+            "json": {"name": "3rd", "username": extension, "domain": provider.vodia_domain},
+            "timeout": VODIA_REQUEST_TIMEOUT,
+        }
         try:
-            response = requests.post(
-                f"https://{host}/rest/system/session",
-                auth=(provider.vodia_admin_username, provider.vodia_admin_password),
-                json={"name": "3rd", "username": extension, "domain": provider.vodia_domain},
-                timeout=VODIA_REQUEST_TIMEOUT,
-            )
+            try:
+                response = requests.post(url, **request_kwargs)
+            except requests.exceptions.SSLError as ssl_error:
+                if "UNSAFE_LEGACY_RENEGOTIATION" not in str(ssl_error):
+                    raise
+                # Old PBX TLS stack (pre-RFC 5746): retry with legacy
+                # renegotiation permitted, certificate checks still on.
+                session = requests.Session()
+                session.mount("https://", _LegacyTlsAdapter())
+                response = session.post(url, **request_kwargs)
             # Vodia answers 404 when the endpoint exists but the referenced
             # domain or extension does not.
             if response.status_code == 404:
