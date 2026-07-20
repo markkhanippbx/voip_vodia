@@ -743,14 +743,14 @@ export class VodiaUserAgent {
         if (!message.action) {
             if (message.invitesdp) {
                 // Incoming call: the PBX's SDP offer for our leg.
-                this._onIncomingInvitation(message);
+                this._onIncomingInvitation(message).catch((error) => console.error(error));
             } else if (message.bye) {
-                this._onRemoteBye(message);
+                this._onRemoteBye(message).catch((error) => console.error(error));
             } else if (message.sdp) {
                 // SDP for our pending call (e.g. code 183 early media). The
                 // PBX sends its own OFFER (a=setup:actpass) regardless of the
                 // SDP we sent in sdp-packet, and expects an answer back.
-                this._onRemoteSdp(message);
+                this._onRemoteSdp(message).catch((error) => console.error(error));
             } else if (message.candidate) {
                 // Trickle ICE from the PBX: a raw candidate string, plus an
                 // "adr" list of (address, port) pairs to substitute into it —
@@ -781,7 +781,7 @@ export class VodiaUserAgent {
             case "sdp-packet":
             case "sdp-200ok":
             case "sdp-answer":
-                this._onRemoteSdp(message);
+                this._onRemoteSdp(message).catch((error) => console.error(error));
                 break;
             case "call-state":
                 this._onCallState(message);
@@ -801,7 +801,7 @@ export class VodiaUserAgent {
             }
             case "sip-bye":
             case "bye":
-                this._onRemoteBye(message);
+                this._onRemoteBye(message).catch((error) => console.error(error));
                 break;
             case "sip-cancel":
             case "cancel": {
@@ -953,7 +953,10 @@ export class VodiaUserAgent {
             }
         }
         this.remoteAudio.srcObject = remoteStream;
-        this.remoteAudio.play();
+        // The play() promise rejects with a stackless DOMException when
+        // interrupted by pause() (e.g. a call that fails right away), which
+        // crashes Odoo's uncaught-rejection formatter: always swallow it.
+        Promise.resolve(this.remoteAudio.play()).catch(() => {});
     }
 
     /** @param {Object} data */
