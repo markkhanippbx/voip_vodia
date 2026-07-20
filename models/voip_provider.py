@@ -1,3 +1,4 @@
+import re
 import ssl
 
 import requests
@@ -139,9 +140,13 @@ class VoipProvider(models.Model):
             raise UserError(
                 _("The Vodia PBX rejected the token request. Please check the Vodia admin credentials.")
             )
+        # e.g. "PBX/70.1" or "PBX/67.0.5 (Debian64)" — the frontend signaling
+        # dialect differs between major versions.
+        version_match = re.search(r"PBX/([\d.]+)", response.headers.get("Server", ""))
         return {
             "token": token,
             "domain": provider.vodia_domain,
             "user": extension,
             "pbx": host,
+            "version": version_match.group(1) if version_match else "",
         }

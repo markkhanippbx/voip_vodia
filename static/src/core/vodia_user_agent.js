@@ -337,6 +337,8 @@ export class VodiaUserAgent {
         const tokenInfo = await this.voip.orm.call("voip.provider", "get_vodia_session_token", [
             [this.voip.providerId],
         ]);
+        // Signaling dialect differs by PBX major version (see _onRemoteSdp).
+        this.pbxVersion = parseFloat(tokenInfo.version) || 0;
         await this._authenticate(tokenInfo);
         const url = `wss://${tokenInfo.pbx}/websocket?domain=${encodeURIComponent(
             tokenInfo.domain
@@ -756,6 +758,9 @@ export class VodiaUserAgent {
                 // "adr" list of (address, port) pairs to substitute into it —
                 // one candidate per address (mirrors Vodia's own client).
                 const fields = String(message.candidate).trim().split(" ");
+                // sdpMLineIndex only (no sdpMid): audio is always the first
+                // m-line, and old PBX SDP may lack a=mid, which would make a
+                // literal sdpMid fail to match.
                 if (Array.isArray(message.adr) && fields.length > 5) {
                     for (const [address, port] of message.adr) {
                         const variant = [...fields];
@@ -763,14 +768,12 @@ export class VodiaUserAgent {
                         variant[5] = String(port);
                         this._addRemoteIceCandidate({
                             candidate: variant.join(" "),
-                            sdpMid: "0",
                             sdpMLineIndex: 0,
                         });
                     }
                 } else {
                     this._addRemoteIceCandidate({
                         candidate: fields.join(" "),
-                        sdpMid: "0",
                         sdpMLineIndex: 0,
                     });
                 }
@@ -862,7 +865,16 @@ export class VodiaUserAgent {
             this._onOutgoingInvitationRejected(statusCode, message.reason || "");
             return;
         }
-        const isOffer = /a=setup:actpass/.test(sdp);
+        let isOffer = /a=setup:actpass/.test(sdp);
+        // Dialect split (verified against live 70.1 and 67.0 servers):
+        // - v69/70+: the PBX ignores the SDP sent in sdp-packet and sends its
+        //   own OFFER to the caller, expecting an sdp-200ok answer back.
+        // - v67/68: classic flow — the client's sdp-packet SDP is the offer
+        //   and the PBX's SDP is the ANSWER (often mislabeled a=setup:actpass;
+        //   its own client forces type "answer" regardless).
+        if (isOffer && this.pbxVersion && this.pbxVersion < 69 && this.session.vodia.isCaller) {
+            isOffer = false;
+        }
         try {
             if (isOffer) {
                 if (pc.signalingState === "have-local-offer") {
@@ -879,7 +891,10 @@ export class VodiaUserAgent {
                     cseq: this.session.vodia.cseq,
                 });
             } else if (pc.signalingState === "have-local-offer") {
-                await pc.setRemoteDescription({ type: "answer", sdp });
+                // Answers must declare an active or passive DTLS role;
+                // normalize mislabeled actpass answers from old servers.
+                const answerSdp = sdp.replace(/a=setup:actpass/g, "a=setup:passive");
+                await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
                 this._flushPendingIceCandidates();
             }
         } catch (error) {
