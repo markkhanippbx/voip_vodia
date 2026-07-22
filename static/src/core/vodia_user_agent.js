@@ -124,6 +124,11 @@ export class VodiaUserAgent {
     }
 
     async acceptIncomingCall() {
+        if (!this.session?.vodia || this.session.vodia.accepting) {
+            // Already being accepted (double click on the Accept button).
+            return;
+        }
+        this.session.vodia.accepting = true;
         this.ringtoneService.stopPlaying();
         this.voip.triggerError(_t("Please accept the use of the microphone."));
         let stream;
