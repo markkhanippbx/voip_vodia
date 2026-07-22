@@ -27,6 +27,22 @@ xpath, JS `patch()`), so nothing in the enterprise `voip` directory is modified.
   behind the same interface as the native sip.js agent — the whole softphone UI
   works unchanged for both provider types. Demo mode always uses the native agent.
 
+## FusionPBX
+
+FusionPBX (FreeSWITCH) uses **standard SIP over WebSocket** — the native VoIP
+engine, same as FreePBX. Select the *FusionPBX* provider type and configure:
+
+- **WebSocket**: `wss://<server>:7443` (FreeSWITCH's WSS port). The TLS
+  certificate on 7443 must be valid in browsers — replace FreeSWITCH's
+  default self-signed cert (e.g. Let's Encrypt into `/etc/freeswitch/tls/`).
+- **PBX Server (IP / Domain)**: the FusionPBX **tenant domain** (registration
+  is `sip:<extension>@<domain>`), not the raw server IP.
+- Per user: extension number as *VoIP username* and the extension's **SIP
+  password** (not the portal login) as *VoIP secret*.
+- The internal SIP profile must have the `wss-binding` enabled (FusionPBX
+  default) and firewall must allow 7443/tcp plus the RTP range (16384–32768/udp
+  by default).
+
 ## Requirements / notes
 
 - Targets the same Odoo version as the native `voip` app it extends (Odoo 18 API).

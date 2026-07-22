@@ -30,11 +30,15 @@ class VoipProvider(models.Model):
     provider_type = fields.Selection(
         [
             ("freepbx", "FreePBX"),
+            ("fusionpbx", "FusionPBX"),
             ("vodia", "Vodia"),
         ],
         string="Provider Type",
         default="freepbx",
         required=True,
+        help="FreePBX and FusionPBX both use standard SIP over WebSocket (the native VoIP engine); "
+        "FusionPBX serves WSS on port 7443 and registers against the tenant domain. "
+        "Vodia uses its proprietary JSON-over-WebSocket protocol.",
     )
     vodia_domain = fields.Char(
         "Vodia Domain",

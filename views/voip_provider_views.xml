@@ -9,7 +9,7 @@
                 <field name="provider_type"/>
             </field>
             <field name="ws_server" position="attributes">
-                <attribute name="required">mode == 'prod' and provider_type == 'freepbx'</attribute>
+                <attribute name="required">mode == 'prod' and provider_type != 'vodia'</attribute>
                 <attribute name="readonly">provider_type == 'vodia'</attribute>
             </field>
             <field name="pbx_ip" position="attributes">
