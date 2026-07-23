@@ -364,7 +364,7 @@ export class VodiaUserAgent {
                     ...ALL_STRATEGIES.filter((strategy) => strategy !== this.__wsAuthStrategy),
                 ]
               : ALL_STRATEGIES;
-        let lastError;
+        const failures = [];
         for (const strategy of strategies) {
             try {
                 await this._connectOnce(strategy);
@@ -372,11 +372,13 @@ export class VodiaUserAgent {
                 console.info(`[voip_vodia] connected (auth strategy: ${strategy})`);
                 return;
             } catch (error) {
-                lastError = error;
+                failures.push(`${strategy}: ${error.data?.message || error.message}`);
                 console.info(`[voip_vodia] auth strategy "${strategy}" failed:`, error.message);
             }
         }
-        throw lastError;
+        // Per-strategy detail so the failure cause is visible on devices
+        // without an accessible console (iOS).
+        throw new Error(failures.join("\n"));
     }
 
     /** @param {"cookie"|"session"|"query"} strategy */
