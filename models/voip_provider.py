@@ -79,6 +79,54 @@ class VoipProvider(models.Model):
                 host = host[len(prefix):]
         return host
 
+    @staticmethod
+    def _vodia_post(url, request_kwargs):
+        """POST to the PBX, retrying with legacy TLS renegotiation permitted
+        when the PBX's TLS stack predates RFC 5746 (e.g. Vodia 67).
+        Certificate verification stays enabled in both attempts.
+        """
+        try:
+            return requests.post(url, **request_kwargs)
+        except requests.exceptions.SSLError as ssl_error:
+            if "UNSAFE_LEGACY_RENEGOTIATION" not in str(ssl_error):
+                raise
+            session = requests.Session()
+            session.mount("https://", _LegacyTlsAdapter())
+            return session.post(url, **request_kwargs)
+
+    def get_vodia_session(self):
+        """Mints a token AND activates it server-side, returning the live
+        session id to be passed in the WebSocket URL. Used by clients whose
+        browsers cannot present third-party cookies on the WebSocket handshake
+        (iOS/WebKit): unlike a browser, the server can read the Set-Cookie of
+        the activation response.
+        """
+        token_info = self.get_vodia_session_token()
+        url = f"https://{token_info['pbx']}/rest/system/session"
+        try:
+            response = self._vodia_post(url, {
+                "json": {"name": "session", "value": token_info["token"]},
+                "timeout": VODIA_REQUEST_TIMEOUT,
+            })
+            response.raise_for_status()
+        except requests.exceptions.RequestException as error:
+            raise UserError(
+                _("Could not activate the Vodia session: %(error)s", error=error)
+            ) from error
+        session_id = response.cookies.get("session") or ""
+        if not session_id:
+            # Some versions may return it in the body instead.
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = None
+            if isinstance(payload, dict):
+                session_id = payload.get("session") or payload.get("value") or ""
+        if not session_id:
+            raise UserError(_("The Vodia PBX did not return a session id."))
+        token_info["session"] = session_id
+        return token_info
+
     def get_vodia_session_token(self):
         """Mint a single-use Vodia login token for the calling user's extension
         using Vodia's third-party login (https://doc.vodia.com/docs/thirdparty).
@@ -115,16 +163,7 @@ class VoipProvider(models.Model):
             "timeout": VODIA_REQUEST_TIMEOUT,
         }
         try:
-            try:
-                response = requests.post(url, **request_kwargs)
-            except requests.exceptions.SSLError as ssl_error:
-                if "UNSAFE_LEGACY_RENEGOTIATION" not in str(ssl_error):
-                    raise
-                # Old PBX TLS stack (pre-RFC 5746): retry with legacy
-                # renegotiation permitted, certificate checks still on.
-                session = requests.Session()
-                session.mount("https://", _LegacyTlsAdapter())
-                response = session.post(url, **request_kwargs)
+            response = self._vodia_post(url, request_kwargs)
             # Vodia answers 404 when the endpoint exists but the referenced
             # domain or extension does not.
             if response.status_code == 404:

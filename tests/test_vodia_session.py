@@ -68,6 +68,22 @@ class TestVodiaSession(common.TransactionCase):
             {"name": "3rd", "username": "40", "domain": "tenant.example.com"},
         )
 
+    def test_server_side_session_activation(self):
+        """get_vodia_session must mint a token, activate it server-side and
+        return the session id captured from the activation cookie."""
+        token_response = _make_response(text="tok123")
+        activation_response = _make_response(text="{}")
+        activation_response.cookies = {"session": "livesession42"}
+        with patch(MOCK_PATH, side_effect=[token_response, activation_response]) as mocked_post:
+            result = self.vodia_provider.with_user(self.user).get_vodia_session()
+        self.assertEqual(result["session"], "livesession42")
+        self.assertEqual(result["token"], "tok123")
+        # Second call is the unauthenticated activation.
+        args, kwargs = mocked_post.call_args_list[1]
+        self.assertEqual(args[0], "https://vodia.example.com/rest/system/session")
+        self.assertNotIn("auth", kwargs)
+        self.assertEqual(kwargs["json"], {"name": "session", "value": "tok123"})
+
     def test_token_json_response_shapes(self):
         """Vodia may return the token as plain text or wrapped in JSON."""
         response = _make_response(text='"quoted"')

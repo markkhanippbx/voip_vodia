@@ -339,16 +339,23 @@ export class VodiaUserAgent {
      *    events.
      */
     async _connect() {
-        // Two WebSocket auth strategies:
+        // WebSocket auth strategies, tried in order:
         // - "cookie": activate the token via fetch so the session cookie is
         //   presented on the WS handshake. Works on Chrome (desktop/Android),
         //   but WebKit (iOS/Safari) blocks third-party cookies entirely.
-        // - "query": pass the fresh unactivated token as the "session" URL
-        //   parameter; the PBX (v70+) exchanges it server-side.
+        // - "session": the Odoo server activates the token and returns the
+        //   live session id, passed as the "session" WS URL parameter — no
+        //   browser cookies involved (the iOS path).
+        // - "query": pass the fresh unactivated token in the URL (some PBX
+        //   versions may exchange it server-side).
         // The first strategy that works is remembered for reconnections.
+        const ALL_STRATEGIES = ["cookie", "session", "query"];
         const strategies = this.__wsAuthStrategy
-            ? [this.__wsAuthStrategy, this.__wsAuthStrategy === "cookie" ? "query" : "cookie"]
-            : ["cookie", "query"];
+            ? [
+                  this.__wsAuthStrategy,
+                  ...ALL_STRATEGIES.filter((strategy) => strategy !== this.__wsAuthStrategy),
+              ]
+            : ALL_STRATEGIES;
         let lastError;
         for (const strategy of strategies) {
             try {
@@ -364,10 +371,13 @@ export class VodiaUserAgent {
         throw lastError;
     }
 
-    /** @param {"cookie"|"query"} strategy */
+    /** @param {"cookie"|"session"|"query"} strategy */
     async _connectOnce(strategy) {
-        // A fresh token per attempt: they are single-use and ~10s-lived.
-        const tokenInfo = await this.voip.orm.call("voip.provider", "get_vodia_session_token", [
+        // A fresh token per attempt: they are single-use and ~10s-lived. The
+        // "session" strategy asks the server to also activate it and return
+        // the live session id.
+        const method = strategy === "session" ? "get_vodia_session" : "get_vodia_session_token";
+        const tokenInfo = await this.voip.orm.call("voip.provider", method, [
             [this.voip.providerId],
         ]);
         // Signaling dialect differs by PBX major version (see _onRemoteSdp).
@@ -387,6 +397,8 @@ export class VodiaUserAgent {
         )}&user=${encodeURIComponent(tokenInfo.user)}`;
         if (strategy === "cookie") {
             await this._authenticate(tokenInfo);
+        } else if (strategy === "session") {
+            url += `&session=${encodeURIComponent(tokenInfo.session)}`;
         } else {
             url += `&session=${encodeURIComponent(tokenInfo.token)}`;
         }
