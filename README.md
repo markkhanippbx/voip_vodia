@@ -43,6 +43,44 @@ engine, same as FreePBX. Select the *FusionPBX* provider type and configure:
   default) and firewall must allow 7443/tcp plus the RTP range (16384–32768/udp
   by default).
 
+## iOS / Safari (WebKit): WebSocket proxy
+
+WebKit blocks third-party cookies entirely, so the Vodia session cookie can
+never accompany a cross-origin WebSocket handshake from Odoo pages on
+iOS/Safari. The client automatically falls back to the "proxy" auth strategy:
+connecting through the **Odoo origin** (first-party everywhere) with the
+server-activated session id in the URL. This requires one nginx block on the
+Odoo server, inside the `server {}` that serves Odoo:
+
+```nginx
+location /vodia-ws/websocket {
+    # Restrict which PBX hosts may be proxied (anti-open-proxy) — adjust to
+    # your PBX domains:
+    if ($arg_pbx !~* ^[A-Za-z0-9.-]+\.(bpsna\.net|bpsnapbx\.com)$) { return 403; }
+    resolver 8.8.8.8 ipv6=off;
+    proxy_pass https://$arg_pbx/websocket?domain=$arg_domain&user=$arg_user;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host $arg_pbx;
+    # Vodia authenticates the handshake by cookie; the client passes the
+    # server-activated session id as a URL parameter instead:
+    proxy_set_header Cookie "session=$arg_session";
+    proxy_ssl_server_name on;
+    proxy_ssl_name $arg_pbx;
+    proxy_read_timeout 3600s;
+    proxy_send_timeout 3600s;
+}
+```
+
+Then `nginx -t && systemctl reload nginx`. A bonus of this path: the WebSocket
+reaches the PBX from the Odoo server's IP — the same IP that activated the
+session — so it also works if the PBX binds sessions to the activating IP.
+
+For debugging, force one auth strategy from the browser console:
+`localStorage.setItem("voip_vodia.authStrategy", "session")` (values: cookie,
+session, query, proxy; remove with `localStorage.removeItem(...)`).
+
 ## Requirements / notes
 
 - Targets the same Odoo version as the native `voip` app it extends (Odoo 18 API).

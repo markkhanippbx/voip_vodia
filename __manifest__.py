@@ -7,7 +7,7 @@ WebSocket, and authenticate users through server-minted session tokens
 (third-party login) so that users never need to know a PBX password.
 The native FreePBX/SIP behavior is left untouched.""",
     "category": "Productivity/VOIP",
-    "version": "18.0.1.6.0",
+    "version": "18.0.1.7.0",
     "depends": ["voip"],
     "data": [
         "views/voip_provider_views.xml",

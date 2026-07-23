@@ -348,14 +348,22 @@ export class VodiaUserAgent {
         //   browser cookies involved (the iOS path).
         // - "query": pass the fresh unactivated token in the URL (some PBX
         //   versions may exchange it server-side).
-        // The first strategy that works is remembered for reconnections.
-        const ALL_STRATEGIES = ["cookie", "session", "query"];
-        const strategies = this.__wsAuthStrategy
-            ? [
-                  this.__wsAuthStrategy,
-                  ...ALL_STRATEGIES.filter((strategy) => strategy !== this.__wsAuthStrategy),
-              ]
-            : ALL_STRATEGIES;
+        // - "proxy": connect through the Odoo origin (first-party for every
+        //   browser); requires the nginx block documented in the README,
+        //   which maps the session URL parameter to the Cookie header.
+        // The first strategy that works is remembered for reconnections. For
+        // debugging, one strategy can be forced from the browser console:
+        //   localStorage.setItem("voip_vodia.authStrategy", "session")
+        const ALL_STRATEGIES = ["cookie", "session", "query", "proxy"];
+        const forced = window.localStorage?.getItem("voip_vodia.authStrategy");
+        const strategies = ALL_STRATEGIES.includes(forced)
+            ? [forced]
+            : this.__wsAuthStrategy
+              ? [
+                    this.__wsAuthStrategy,
+                    ...ALL_STRATEGIES.filter((strategy) => strategy !== this.__wsAuthStrategy),
+                ]
+              : ALL_STRATEGIES;
         let lastError;
         for (const strategy of strategies) {
             try {
@@ -376,7 +384,9 @@ export class VodiaUserAgent {
         // A fresh token per attempt: they are single-use and ~10s-lived. The
         // "session" strategy asks the server to also activate it and return
         // the live session id.
-        const method = strategy === "session" ? "get_vodia_session" : "get_vodia_session_token";
+        const method = ["session", "proxy"].includes(strategy)
+            ? "get_vodia_session"
+            : "get_vodia_session_token";
         const tokenInfo = await this.voip.orm.call("voip.provider", method, [
             [this.voip.providerId],
         ]);
@@ -392,15 +402,28 @@ export class VodiaUserAgent {
                 this.useLegacyDialect ? "legacy" : "modern"
             }`
         );
-        let url = `wss://${tokenInfo.pbx}/websocket?domain=${encodeURIComponent(
-            tokenInfo.domain
-        )}&user=${encodeURIComponent(tokenInfo.user)}`;
-        if (strategy === "cookie") {
-            await this._authenticate(tokenInfo);
-        } else if (strategy === "session") {
-            url += `&session=${encodeURIComponent(tokenInfo.session)}`;
+        let url;
+        if (strategy === "proxy") {
+            // Through the Odoo origin: first-party in every browser. The
+            // nginx block forwards to the PBX and turns the session
+            // parameter into the Cookie header Vodia expects.
+            url =
+                `wss://${window.location.host}/vodia-ws/websocket` +
+                `?pbx=${encodeURIComponent(tokenInfo.pbx)}` +
+                `&domain=${encodeURIComponent(tokenInfo.domain)}` +
+                `&user=${encodeURIComponent(tokenInfo.user)}` +
+                `&session=${encodeURIComponent(tokenInfo.session)}`;
         } else {
-            url += `&session=${encodeURIComponent(tokenInfo.token)}`;
+            url = `wss://${tokenInfo.pbx}/websocket?domain=${encodeURIComponent(
+                tokenInfo.domain
+            )}&user=${encodeURIComponent(tokenInfo.user)}`;
+            if (strategy === "cookie") {
+                await this._authenticate(tokenInfo);
+            } else if (strategy === "session") {
+                url += `&session=${encodeURIComponent(tokenInfo.session)}`;
+            } else {
+                url += `&session=${encodeURIComponent(tokenInfo.token)}`;
+            }
         }
         await new Promise((resolve, reject) => {
             const websocket = new WebSocket(url);
