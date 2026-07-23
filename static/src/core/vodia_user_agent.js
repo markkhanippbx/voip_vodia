@@ -339,6 +339,34 @@ export class VodiaUserAgent {
      *    events.
      */
     async _connect() {
+        // Two WebSocket auth strategies:
+        // - "cookie": activate the token via fetch so the session cookie is
+        //   presented on the WS handshake. Works on Chrome (desktop/Android),
+        //   but WebKit (iOS/Safari) blocks third-party cookies entirely.
+        // - "query": pass the fresh unactivated token as the "session" URL
+        //   parameter; the PBX (v70+) exchanges it server-side.
+        // The first strategy that works is remembered for reconnections.
+        const strategies = this.__wsAuthStrategy
+            ? [this.__wsAuthStrategy, this.__wsAuthStrategy === "cookie" ? "query" : "cookie"]
+            : ["cookie", "query"];
+        let lastError;
+        for (const strategy of strategies) {
+            try {
+                await this._connectOnce(strategy);
+                this.__wsAuthStrategy = strategy;
+                console.info(`[voip_vodia] connected (auth strategy: ${strategy})`);
+                return;
+            } catch (error) {
+                lastError = error;
+                console.info(`[voip_vodia] auth strategy "${strategy}" failed:`, error.message);
+            }
+        }
+        throw lastError;
+    }
+
+    /** @param {"cookie"|"query"} strategy */
+    async _connectOnce(strategy) {
+        // A fresh token per attempt: they are single-use and ~10s-lived.
         const tokenInfo = await this.voip.orm.call("voip.provider", "get_vodia_session_token", [
             [this.voip.providerId],
         ]);
@@ -354,10 +382,14 @@ export class VodiaUserAgent {
                 this.useLegacyDialect ? "legacy" : "modern"
             }`
         );
-        await this._authenticate(tokenInfo);
-        const url = `wss://${tokenInfo.pbx}/websocket?domain=${encodeURIComponent(
+        let url = `wss://${tokenInfo.pbx}/websocket?domain=${encodeURIComponent(
             tokenInfo.domain
         )}&user=${encodeURIComponent(tokenInfo.user)}`;
+        if (strategy === "cookie") {
+            await this._authenticate(tokenInfo);
+        } else {
+            url += `&session=${encodeURIComponent(tokenInfo.token)}`;
+        }
         await new Promise((resolve, reject) => {
             const websocket = new WebSocket(url);
             websocket.onopen = () => {
@@ -390,7 +422,12 @@ export class VodiaUserAgent {
             websocket.onclose = (ev) => {
                 clearInterval(this.keepAliveInterval);
                 reject(new Error(`WebSocket closed (code ${ev.code}).`));
-                this._onWebSocketDisconnected(ev);
+                // Only treat as a lost connection if this socket had actually
+                // opened; a close before onopen is a failed connect attempt
+                // handled by the strategy loop, not a disconnection.
+                if (this.websocket === websocket) {
+                    this._onWebSocketDisconnected(ev);
+                }
             };
             websocket.onerror = () => {
                 reject(new Error("WebSocket connection failed."));
