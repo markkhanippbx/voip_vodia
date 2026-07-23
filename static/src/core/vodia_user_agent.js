@@ -56,6 +56,19 @@ export class VodiaUserAgent {
         this.voip = services.voip;
         this.softphone = this.voip.softphone;
         const proxy = reactive(this);
+        // Mobile OSes suspend the page when the app is backgrounded, killing
+        // the WebSocket; reconnect immediately when it comes back to the
+        // foreground instead of waiting for a retry timer.
+        document.addEventListener("visibilitychange", () => {
+            if (
+                document.visibilityState === "visible" &&
+                !proxy.websocket &&
+                !proxy.attemptingToReconnect &&
+                proxy.voip.mode === "prod"
+            ) {
+                proxy.attemptReconnection();
+            }
+        });
         proxy.init();
         return proxy;
     }
