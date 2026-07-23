@@ -198,6 +198,18 @@ class VoipProvider(models.Model):
         # e.g. "PBX/70.1" or "PBX/67.0.5 (Debian64)" — the frontend signaling
         # dialect differs between major versions.
         version_match = re.search(r"PBX/([\d.]+)", response.headers.get("Server", ""))
+        if not version_match:
+            # Some responses omit the Server header; the PBX root reliably
+            # carries it.
+            try:
+                root_session = requests.Session()
+                root_session.mount("https://", _LegacyTlsAdapter())
+                root = root_session.get(
+                    f"https://{host}/", timeout=VODIA_REQUEST_TIMEOUT, allow_redirects=False
+                )
+                version_match = re.search(r"PBX/([\d.]+)", root.headers.get("Server", ""))
+            except requests.exceptions.RequestException:
+                pass
         return {
             "token": token,
             "domain": provider.vodia_domain,
